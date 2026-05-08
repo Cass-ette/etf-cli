@@ -18,11 +18,13 @@ import requests
 
 CONFIG_DIR = Path.home() / ".etf"
 CONFIG_FILE = CONFIG_DIR / "watchlist.json"
+FUND_PAIR_FILE = CONFIG_DIR / "pairs.json"
 
 # API endpoints
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 EASTMONEY_BATCH_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
+TIANTIAN_FUND_URL = "https://fundgz.1234567.com.cn/js"
 
 # Data provider registry
 DATA_PROVIDERS = {}
@@ -104,8 +106,12 @@ class ETFQuote:
         return asdict(self)
 
     def to_ai_context(self) -> str:
+        pe = f"{self.pe:.2f}" if self.pe is not None else "N/A"
+        pb = f"{self.pb:.2f}" if self.pb is not None else "N/A"
         return f"""## {self.name} ({self.symbol})
 
+- **类型**: 场内 ETF / Exchange-traded ETF
+- **价格类型**: 交易所实时价格
 - **最新价**: {self.latest:.3f}
 - **涨跌幅**: {self.change_pct:+.2f}%
 - **涨跌额**: {self.change_amount:+.3f}
@@ -116,8 +122,39 @@ class ETFQuote:
 - **振幅**: {self.intraday_range:.2f}%
 - **成交量**: {self.volume:,} 手 ({self.volume * 100:,} 股)
 - **成交额**: {self.amount:,.0f} 元
-- **市盈率**: {self.pe:.2f if self.pe else "N/A"}
-- **市净率**: {self.pb:.2f if self.pb else "N/A"}
+- **市盈率**: {pe}
+- **市净率**: {pb}
+"""
+
+
+@dataclass
+class OTCFundQuote:
+    symbol: str
+    name: str
+    latest_nav: float
+    latest_nav_date: str
+    estimated_nav: Optional[float]
+    estimated_change_pct: Optional[float]
+    estimate_time: Optional[str]
+    source: str = "tiantian"
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_ai_context(self) -> str:
+        estimated_nav = f"{self.estimated_nav:.4f}" if self.estimated_nav is not None else "N/A"
+        estimated_change = f"{self.estimated_change_pct:+.2f}%" if self.estimated_change_pct is not None else "N/A"
+        estimate_time = self.estimate_time or "N/A"
+        return f"""## {self.name} ({self.symbol})
+
+- **类型**: 场外基金 / OTC fund
+- **价格类型**: 基金净值/估算净值
+- **最新单位净值**: {self.latest_nav:.4f}
+- **净值日期**: {self.latest_nav_date}
+- **估算净值**: {estimated_nav}
+- **估算涨跌幅**: {estimated_change}
+- **估算时间**: {estimate_time}
+- **说明**: 估算净值不是最终成交净值，最终净值通常在交易日晚上更新。
 """
 
 
@@ -255,6 +292,46 @@ def fetch_quote(symbol: str) -> Optional[ETFQuote]:
     pass
 
 
+def fetch_fund_quote(symbol: str) -> Optional[OTCFundQuote]:
+    """Fetch OTC fund NAV and estimated NAV from Tiantian Fund."""
+    symbol = symbol.strip()
+    url = f"{TIANTIAN_FUND_URL}/{symbol}.js"
+    params = {"rt": int(time.time() * 1000)}
+
+    try:
+        resp = requests.get(url, params=params, timeout=10)
+        resp.raise_for_status()
+        text = resp.text.strip()
+        if not text.startswith("jsonpgz(") or not text.endswith(");"):
+            return None
+
+        data = json.loads(text[len("jsonpgz("):-2])
+        return OTCFundQuote(
+            symbol=data.get("fundcode", symbol),
+            name=data.get("name", "Unknown"),
+            latest_nav=float(data.get("dwjz") or 0),
+            latest_nav_date=data.get("jzrq", ""),
+            estimated_nav=float(data["gsz"]) if data.get("gsz") else None,
+            estimated_change_pct=float(data["gszzl"]) if data.get("gszzl") else None,
+            estimate_time=data.get("gztime") or None,
+        )
+    except Exception:
+        return None
+
+
+def load_pairs() -> dict:
+    """Load ETF/fund pairs from config."""
+    if not FUND_PAIR_FILE.exists():
+        return {}
+    return json.loads(FUND_PAIR_FILE.read_text())
+
+
+def save_pairs(pairs: dict) -> None:
+    """Save ETF/fund pairs to config."""
+    FUND_PAIR_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FUND_PAIR_FILE.write_text(json.dumps(pairs, indent=2, ensure_ascii=False))
+
+
 def fetch_batch_quotes(symbols: list[str]) -> list[ETFQuote]:
     """Fetch quotes for multiple ETFs. Falls back to individual fetches if batch fails."""
     try:
@@ -364,6 +441,38 @@ def get(symbol: str, output_json: bool, output_ai: bool, source: Optional[str]):
 
 
 @cli.command()
+@click.argument("symbol")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
+@click.option("--ai", "output_ai", is_flag=True, help="Output AI-friendly markdown context")
+def fund(symbol: str, output_json: bool, output_ai: bool):
+    """Get NAV and estimate for an OTC fund"""
+    quote = fetch_fund_quote(symbol)
+
+    if not quote:
+        click.echo(f"Failed to fetch fund quote for {symbol}", err=True)
+        sys.exit(1)
+
+    if output_json:
+        click.echo(json.dumps(quote.to_dict(), indent=2, ensure_ascii=False))
+    elif output_ai:
+        click.echo(quote.to_ai_context())
+    else:
+        color = "green" if (quote.estimated_change_pct or 0) >= 0 else "red"
+        sign = "+" if (quote.estimated_change_pct or 0) >= 0 else ""
+        estimated_nav = f"{quote.estimated_nav:.4f}" if quote.estimated_nav is not None else "N/A"
+        estimated_change = f"{sign}{quote.estimated_change_pct:.2f}%" if quote.estimated_change_pct is not None else "N/A"
+
+        click.echo(f"\n{click.style(quote.name, bold=True)} ({quote.symbol})")
+        click.echo("类型: 场外基金")
+        click.echo(f"最新单位净值: {quote.latest_nav:.4f}")
+        click.echo(f"净值日期: {quote.latest_nav_date}")
+        click.echo(f"估算净值: {estimated_nav}")
+        click.echo(f"估算涨跌幅: {click.style(estimated_change, fg=color)}")
+        click.echo(f"估算时间: {quote.estimate_time or 'N/A'}")
+        click.echo("说明: 估算净值不是最终成交净值，最终净值通常在交易日晚上更新。")
+
+
+@cli.command()
 def list():
     """Show your ETF watchlist"""
     if not CONFIG_FILE.exists():
@@ -437,6 +546,104 @@ def remove(symbol: str):
 
     CONFIG_FILE.write_text(json.dumps(watchlist, indent=2))
     click.echo(f"Removed {symbol.upper()}")
+
+
+@cli.group()
+def pair():
+    """Manage ETF and OTC fund pairs"""
+    pass
+
+
+@pair.command("add")
+@click.argument("name")
+@click.argument("etf_symbol")
+@click.argument("fund_symbol")
+def pair_add(name: str, etf_symbol: str, fund_symbol: str):
+    """Add an ETF/OTC fund pair"""
+    pairs = load_pairs()
+    pairs[name] = {"name": name, "etf": etf_symbol.upper(), "fund": fund_symbol}
+    save_pairs(pairs)
+    click.echo(f"Added pair {name}: ETF {etf_symbol.upper()} + fund {fund_symbol}")
+
+
+@pair.command("remove")
+@click.argument("name")
+def pair_remove(name: str):
+    """Remove an ETF/OTC fund pair"""
+    pairs = load_pairs()
+    if name not in pairs:
+        click.echo(f"Pair {name} not found", err=True)
+        sys.exit(1)
+    del pairs[name]
+    save_pairs(pairs)
+    click.echo(f"Removed pair {name}")
+
+
+@pair.command("list")
+def pair_list():
+    """List ETF/OTC fund pairs"""
+    pairs = load_pairs()
+    if not pairs:
+        click.echo("No pairs configured. Use 'etf pair add <name> <etf> <fund>'.")
+        return
+
+    click.echo(f"\n{'名称':<12} {'场内ETF':<12} {'场外基金':<12}")
+    click.echo("-" * 40)
+    for name, item in pairs.items():
+        click.echo(f"{name:<12} {item['etf']:<12} {item['fund']:<12}")
+
+
+@pair.command("get")
+@click.argument("name")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
+@click.option("--ai", "output_ai", is_flag=True, help="Output AI-friendly markdown context")
+def pair_get(name: str, output_json: bool, output_ai: bool):
+    """Get combined ETF and OTC fund context"""
+    pairs = load_pairs()
+    if name not in pairs:
+        click.echo(f"Pair {name} not found", err=True)
+        sys.exit(1)
+
+    item = pairs[name]
+    etf_quote = fetch_quote(item["etf"])
+    fund_quote = fetch_fund_quote(item["fund"])
+
+    if not etf_quote or not fund_quote:
+        click.echo(f"Failed to fetch pair {name}", err=True)
+        sys.exit(1)
+
+    notes = [
+        "exchange_traded_etf is real-time market price",
+        "otc_fund estimated_nav is not final transaction NAV",
+        "OTC fund orders before 15:00 usually settle at current trading day's final NAV",
+    ]
+
+    if output_json:
+        data = {
+            "type": "etf_otc_fund_pair",
+            "name": name,
+            "exchange_traded_etf": etf_quote.to_dict(),
+            "otc_fund": fund_quote.to_dict(),
+            "notes": notes,
+        }
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+    elif output_ai:
+        click.echo(f"# ETF / 场外基金配对行情上下文: {name}\n")
+        click.echo("## 场内 ETF 参考\n")
+        click.echo(etf_quote.to_ai_context())
+        click.echo("\n## 场外基金实际交易对象\n")
+        click.echo(fund_quote.to_ai_context())
+        click.echo("\n## 重要说明")
+        click.echo("- 场内 ETF 是交易所实时价格。")
+        click.echo("- 场外基金以最终净值成交，估算净值仅供参考。")
+        click.echo("- 如果是 15:00 前申购/赎回，通常按当日最终净值结算。")
+    else:
+        click.echo(f"\n{name}")
+        click.echo(f"场内ETF: {etf_quote.name} ({etf_quote.symbol}) {etf_quote.latest:.3f} {etf_quote.change_pct:+.2f}%")
+        estimated_nav = f"{fund_quote.estimated_nav:.4f}" if fund_quote.estimated_nav is not None else "N/A"
+        estimated_change = f"{fund_quote.estimated_change_pct:+.2f}%" if fund_quote.estimated_change_pct is not None else "N/A"
+        click.echo(f"场外基金: {fund_quote.name} ({fund_quote.symbol}) 估算净值 {estimated_nav} {estimated_change}")
+        click.echo(f"估算时间: {fund_quote.estimate_time or 'N/A'}")
 
 
 @cli.command()
