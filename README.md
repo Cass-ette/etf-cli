@@ -52,6 +52,21 @@ etf fund 018344 --json
 etf fund 018344 --ai
 ```
 
+### Smart lookup
+
+`smart` chooses the right output automatically:
+
+1. Pair name first, e.g. `robot` → combined ETF + OTC fund AI context
+2. Exchange-traded ETF-like code, e.g. `562500` → ETF AI context
+3. Other six-digit code, e.g. `018344` → OTC fund AI context
+
+```bash
+etf smart robot
+etf smart 562500
+etf smart 018344
+etf smart robot --json
+```
+
 ### Manage ETF / OTC fund pairs
 
 Use pairs when you watch the exchange-traded ETF for real-time market reference but actually buy or hold an OTC linked fund.

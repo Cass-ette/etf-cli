@@ -148,3 +148,82 @@ def test_pair_get_ai_labels_etf_and_otc_fund(monkeypatch, tmp_path):
     assert "场内 ETF 参考" in result.output
     assert "场外基金实际交易对象" in result.output
     assert "估算净值仅供参考" in result.output
+
+
+def test_smart_uses_pair_ai_context_when_key_matches_pair(monkeypatch, tmp_path):
+    pair_file = tmp_path / "pairs.json"
+    pair_file.write_text(json.dumps({"robot": {"name": "robot", "etf": "562500", "fund": "018344"}}))
+    monkeypatch.setattr(etf, "FUND_PAIR_FILE", pair_file)
+    monkeypatch.setattr(etf, "fetch_quote", lambda symbol: etf.ETFQuote(
+        symbol="562500",
+        name="机器人ETF华夏",
+        market="SH",
+        latest=1.122,
+        open=1.094,
+        high=1.126,
+        low=1.091,
+        prev_close=1.097,
+        change_amount=0.025,
+        change_pct=2.28,
+        volume=14041248,
+        amount=1563574566,
+    ))
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda symbol: etf.OTCFundQuote(
+        symbol="018344",
+        name="华夏中证机器人ETF发起式联接A",
+        latest_nav=1.3222,
+        latest_nav_date="2026-05-07",
+        estimated_nav=1.3542,
+        estimated_change_pct=2.42,
+        estimate_time="2026-05-08 15:00",
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["smart", "robot"])
+
+    assert result.exit_code == 0
+    assert "ETF / 场外基金配对行情上下文: robot" in result.output
+    assert "场内 ETF 参考" in result.output
+    assert "场外基金实际交易对象" in result.output
+
+
+def test_smart_uses_etf_quote_for_exchange_traded_code(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_PAIR_FILE", tmp_path / "pairs.json")
+    monkeypatch.setattr(etf, "fetch_quote", lambda symbol: etf.ETFQuote(
+        symbol="562500",
+        name="机器人ETF华夏",
+        market="SH",
+        latest=1.122,
+        open=1.094,
+        high=1.126,
+        low=1.091,
+        prev_close=1.097,
+        change_amount=0.025,
+        change_pct=2.28,
+        volume=14041248,
+        amount=1563574566,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["smart", "562500"])
+
+    assert result.exit_code == 0
+    assert "类型**: 场内 ETF" in result.output
+    assert "机器人ETF华夏" in result.output
+
+
+def test_smart_uses_fund_quote_for_non_etf_six_digit_code(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_PAIR_FILE", tmp_path / "pairs.json")
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda symbol: etf.OTCFundQuote(
+        symbol="018344",
+        name="华夏中证机器人ETF发起式联接A",
+        latest_nav=1.3222,
+        latest_nav_date="2026-05-07",
+        estimated_nav=1.3542,
+        estimated_change_pct=2.42,
+        estimate_time="2026-05-08 15:00",
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["smart", "018344"])
+
+    assert result.exit_code == 0
+    assert "类型**: 场外基金" in result.output
+    assert "华夏中证机器人ETF发起式联接A" in result.output

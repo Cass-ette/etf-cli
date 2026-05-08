@@ -326,6 +326,14 @@ def load_pairs() -> dict:
     return json.loads(FUND_PAIR_FILE.read_text())
 
 
+def is_exchange_traded_etf_code(key: str) -> bool:
+    """Return true when a key looks like an exchange-traded ETF code."""
+    code = key.strip().upper()
+    if code.startswith(("SH", "SZ")):
+        code = code[2:]
+    return len(code) == 6 and code.isdigit() and code.startswith(("15", "16", "18", "50", "51", "56", "58"))
+
+
 def save_pairs(pairs: dict) -> None:
     """Save ETF/fund pairs to config."""
     FUND_PAIR_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -548,6 +556,82 @@ def remove(symbol: str):
     click.echo(f"Removed {symbol.upper()}")
 
 
+def output_pair_context(name: str, output_json: bool = False) -> bool:
+    """Output combined ETF/fund pair context. Returns False if pair cannot be fetched."""
+    pairs = load_pairs()
+    if name not in pairs:
+        click.echo(f"Pair {name} not found", err=True)
+        return False
+
+    item = pairs[name]
+    etf_quote = fetch_quote(item["etf"])
+    fund_quote = fetch_fund_quote(item["fund"])
+
+    if not etf_quote or not fund_quote:
+        click.echo(f"Failed to fetch pair {name}", err=True)
+        return False
+
+    notes = [
+        "exchange_traded_etf is real-time market price",
+        "otc_fund estimated_nav is not final transaction NAV",
+        "OTC fund orders before 15:00 usually settle at current trading day's final NAV",
+    ]
+
+    if output_json:
+        data = {
+            "type": "etf_otc_fund_pair",
+            "name": name,
+            "exchange_traded_etf": etf_quote.to_dict(),
+            "otc_fund": fund_quote.to_dict(),
+            "notes": notes,
+        }
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        click.echo(f"# ETF / 场外基金配对行情上下文: {name}\n")
+        click.echo("## 场内 ETF 参考\n")
+        click.echo(etf_quote.to_ai_context())
+        click.echo("\n## 场外基金实际交易对象\n")
+        click.echo(fund_quote.to_ai_context())
+        click.echo("\n## 重要说明")
+        click.echo("- 场内 ETF 是交易所实时价格。")
+        click.echo("- 场外基金以最终净值成交，估算净值仅供参考。")
+        click.echo("- 如果是 15:00 前申购/赎回，通常按当日最终净值结算。")
+    return True
+
+
+@cli.command()
+@click.argument("key")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
+def smart(key: str, output_json: bool):
+    """Smart lookup: pair name, ETF code, or OTC fund code"""
+    pairs = load_pairs()
+    if key in pairs:
+        if not output_pair_context(key, output_json=output_json):
+            sys.exit(1)
+        return
+
+    if is_exchange_traded_etf_code(key):
+        quote = fetch_quote(key)
+        if not quote:
+            click.echo(f"Failed to fetch ETF quote for {key}", err=True)
+            sys.exit(1)
+        if output_json:
+            click.echo(json.dumps(quote.to_dict(), indent=2, ensure_ascii=False))
+        else:
+            click.echo(quote.to_ai_context())
+        return
+
+    quote = fetch_fund_quote(key)
+    if not quote:
+        click.echo(f"Cannot smart-resolve {key}. Try 'etf get {key}', 'etf fund {key}', or 'etf pair get {key}'.", err=True)
+        sys.exit(1)
+
+    if output_json:
+        click.echo(json.dumps(quote.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        click.echo(quote.to_ai_context())
+
+
 @cli.group()
 def pair():
     """Manage ETF and OTC fund pairs"""
@@ -599,6 +683,11 @@ def pair_list():
 @click.option("--ai", "output_ai", is_flag=True, help="Output AI-friendly markdown context")
 def pair_get(name: str, output_json: bool, output_ai: bool):
     """Get combined ETF and OTC fund context"""
+    if output_json or output_ai:
+        if not output_pair_context(name, output_json=output_json):
+            sys.exit(1)
+        return
+
     pairs = load_pairs()
     if name not in pairs:
         click.echo(f"Pair {name} not found", err=True)
@@ -612,38 +701,12 @@ def pair_get(name: str, output_json: bool, output_ai: bool):
         click.echo(f"Failed to fetch pair {name}", err=True)
         sys.exit(1)
 
-    notes = [
-        "exchange_traded_etf is real-time market price",
-        "otc_fund estimated_nav is not final transaction NAV",
-        "OTC fund orders before 15:00 usually settle at current trading day's final NAV",
-    ]
-
-    if output_json:
-        data = {
-            "type": "etf_otc_fund_pair",
-            "name": name,
-            "exchange_traded_etf": etf_quote.to_dict(),
-            "otc_fund": fund_quote.to_dict(),
-            "notes": notes,
-        }
-        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-    elif output_ai:
-        click.echo(f"# ETF / 场外基金配对行情上下文: {name}\n")
-        click.echo("## 场内 ETF 参考\n")
-        click.echo(etf_quote.to_ai_context())
-        click.echo("\n## 场外基金实际交易对象\n")
-        click.echo(fund_quote.to_ai_context())
-        click.echo("\n## 重要说明")
-        click.echo("- 场内 ETF 是交易所实时价格。")
-        click.echo("- 场外基金以最终净值成交，估算净值仅供参考。")
-        click.echo("- 如果是 15:00 前申购/赎回，通常按当日最终净值结算。")
-    else:
-        click.echo(f"\n{name}")
-        click.echo(f"场内ETF: {etf_quote.name} ({etf_quote.symbol}) {etf_quote.latest:.3f} {etf_quote.change_pct:+.2f}%")
-        estimated_nav = f"{fund_quote.estimated_nav:.4f}" if fund_quote.estimated_nav is not None else "N/A"
-        estimated_change = f"{fund_quote.estimated_change_pct:+.2f}%" if fund_quote.estimated_change_pct is not None else "N/A"
-        click.echo(f"场外基金: {fund_quote.name} ({fund_quote.symbol}) 估算净值 {estimated_nav} {estimated_change}")
-        click.echo(f"估算时间: {fund_quote.estimate_time or 'N/A'}")
+    click.echo(f"\n{name}")
+    click.echo(f"场内ETF: {etf_quote.name} ({etf_quote.symbol}) {etf_quote.latest:.3f} {etf_quote.change_pct:+.2f}%")
+    estimated_nav = f"{fund_quote.estimated_nav:.4f}" if fund_quote.estimated_nav is not None else "N/A"
+    estimated_change = f"{fund_quote.estimated_change_pct:+.2f}%" if fund_quote.estimated_change_pct is not None else "N/A"
+    click.echo(f"场外基金: {fund_quote.name} ({fund_quote.symbol}) 估算净值 {estimated_nav} {estimated_change}")
+    click.echo(f"估算时间: {fund_quote.estimate_time or 'N/A'}")
 
 
 @cli.command()
