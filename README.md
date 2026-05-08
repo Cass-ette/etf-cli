@@ -65,6 +65,7 @@ etf smart robot
 etf smart 562500
 etf smart 018344
 etf smart robot --json
+etf smart robot --copy
 ```
 
 ### Manage ETF / OTC fund pairs

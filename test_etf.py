@@ -227,3 +227,42 @@ def test_smart_uses_fund_quote_for_non_etf_six_digit_code(monkeypatch, tmp_path)
     assert result.exit_code == 0
     assert "类型**: 场外基金" in result.output
     assert "华夏中证机器人ETF发起式联接A" in result.output
+
+
+def test_smart_copy_copies_pair_ai_context(monkeypatch, tmp_path):
+    pair_file = tmp_path / "pairs.json"
+    pair_file.write_text(json.dumps({"robot": {"name": "robot", "etf": "562500", "fund": "018344"}}))
+    monkeypatch.setattr(etf, "FUND_PAIR_FILE", pair_file)
+    monkeypatch.setattr(etf, "fetch_quote", lambda symbol: etf.ETFQuote(
+        symbol="562500",
+        name="机器人ETF华夏",
+        market="SH",
+        latest=1.122,
+        open=1.094,
+        high=1.126,
+        low=1.091,
+        prev_close=1.097,
+        change_amount=0.025,
+        change_pct=2.28,
+        volume=14041248,
+        amount=1563574566,
+    ))
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda symbol: etf.OTCFundQuote(
+        symbol="018344",
+        name="华夏中证机器人ETF发起式联接A",
+        latest_nav=1.3222,
+        latest_nav_date="2026-05-07",
+        estimated_nav=1.3542,
+        estimated_change_pct=2.42,
+        estimate_time="2026-05-08 15:00",
+    ))
+
+    copied = []
+    monkeypatch.setattr(etf, "copy_to_clipboard", lambda text: copied.append(text) or True)
+
+    result = CliRunner().invoke(etf.cli, ["smart", "robot", "--copy"])
+
+    assert result.exit_code == 0
+    assert copied
+    assert "ETF / 场外基金配对行情上下文: robot" in copied[0]
+    assert "ETF / 场外基金配对行情上下文: robot" in result.output

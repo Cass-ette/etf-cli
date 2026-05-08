@@ -6,6 +6,8 @@ Fallback: Tencent API
 """
 
 import json
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Callable
@@ -340,6 +342,26 @@ def save_pairs(pairs: dict) -> None:
     FUND_PAIR_FILE.write_text(json.dumps(pairs, indent=2, ensure_ascii=False))
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard using a platform clipboard command."""
+    commands = [
+        ["pbcopy"],
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+    ]
+
+    for command in commands:
+        if shutil.which(command[0]):
+            subprocess.run(command, input=text, text=True, check=True)
+            return True
+
+    if shutil.which("clip"):
+        subprocess.run("clip", input=text, text=True, check=True, shell=True)
+        return True
+
+    return False
+
+
 def fetch_batch_quotes(symbols: list[str]) -> list[ETFQuote]:
     """Fetch quotes for multiple ETFs. Falls back to individual fetches if batch fails."""
     try:
@@ -556,12 +578,12 @@ def remove(symbol: str):
     click.echo(f"Removed {symbol.upper()}")
 
 
-def output_pair_context(name: str, output_json: bool = False) -> bool:
-    """Output combined ETF/fund pair context. Returns False if pair cannot be fetched."""
+def build_pair_context(name: str, output_json: bool = False) -> Optional[str]:
+    """Build combined ETF/fund pair context string."""
     pairs = load_pairs()
     if name not in pairs:
         click.echo(f"Pair {name} not found", err=True)
-        return False
+        return None
 
     item = pairs[name]
     etf_quote = fetch_quote(item["etf"])
@@ -569,7 +591,7 @@ def output_pair_context(name: str, output_json: bool = False) -> bool:
 
     if not etf_quote or not fund_quote:
         click.echo(f"Failed to fetch pair {name}", err=True)
-        return False
+        return None
 
     notes = [
         "exchange_traded_etf is real-time market price",
@@ -585,29 +607,41 @@ def output_pair_context(name: str, output_json: bool = False) -> bool:
             "otc_fund": fund_quote.to_dict(),
             "notes": notes,
         }
-        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
-    else:
-        click.echo(f"# ETF / 场外基金配对行情上下文: {name}\n")
-        click.echo("## 场内 ETF 参考\n")
-        click.echo(etf_quote.to_ai_context())
-        click.echo("\n## 场外基金实际交易对象\n")
-        click.echo(fund_quote.to_ai_context())
-        click.echo("\n## 重要说明")
-        click.echo("- 场内 ETF 是交易所实时价格。")
-        click.echo("- 场外基金以最终净值成交，估算净值仅供参考。")
-        click.echo("- 如果是 15:00 前申购/赎回，通常按当日最终净值结算。")
-    return True
+        return json.dumps(data, indent=2, ensure_ascii=False)
+
+    return "\n".join([
+        f"# ETF / 场外基金配对行情上下文: {name}",
+        "",
+        "## 场内 ETF 参考",
+        "",
+        etf_quote.to_ai_context(),
+        "",
+        "## 场外基金实际交易对象",
+        "",
+        fund_quote.to_ai_context(),
+        "",
+        "## 重要说明",
+        "- 场内 ETF 是交易所实时价格。",
+        "- 场外基金以最终净值成交，估算净值仅供参考。",
+        "- 如果是 15:00 前申购/赎回，通常按当日最终净值结算。",
+    ])
 
 
 @cli.command()
 @click.argument("key")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
-def smart(key: str, output_json: bool):
+@click.option("--copy", "copy_output", is_flag=True, help="Copy output to clipboard")
+def smart(key: str, output_json: bool, copy_output: bool):
     """Smart lookup: pair name, ETF code, or OTC fund code"""
     pairs = load_pairs()
     if key in pairs:
-        if not output_pair_context(key, output_json=output_json):
+        text = build_pair_context(key, output_json=output_json)
+        if text is None:
             sys.exit(1)
+        if copy_output and not copy_to_clipboard(text):
+            click.echo("No clipboard command available", err=True)
+            sys.exit(1)
+        click.echo(text)
         return
 
     if is_exchange_traded_etf_code(key):
@@ -615,10 +649,11 @@ def smart(key: str, output_json: bool):
         if not quote:
             click.echo(f"Failed to fetch ETF quote for {key}", err=True)
             sys.exit(1)
-        if output_json:
-            click.echo(json.dumps(quote.to_dict(), indent=2, ensure_ascii=False))
-        else:
-            click.echo(quote.to_ai_context())
+        text = json.dumps(quote.to_dict(), indent=2, ensure_ascii=False) if output_json else quote.to_ai_context()
+        if copy_output and not copy_to_clipboard(text):
+            click.echo("No clipboard command available", err=True)
+            sys.exit(1)
+        click.echo(text)
         return
 
     quote = fetch_fund_quote(key)
@@ -626,10 +661,11 @@ def smart(key: str, output_json: bool):
         click.echo(f"Cannot smart-resolve {key}. Try 'etf get {key}', 'etf fund {key}', or 'etf pair get {key}'.", err=True)
         sys.exit(1)
 
-    if output_json:
-        click.echo(json.dumps(quote.to_dict(), indent=2, ensure_ascii=False))
-    else:
-        click.echo(quote.to_ai_context())
+    text = json.dumps(quote.to_dict(), indent=2, ensure_ascii=False) if output_json else quote.to_ai_context()
+    if copy_output and not copy_to_clipboard(text):
+        click.echo("No clipboard command available", err=True)
+        sys.exit(1)
+    click.echo(text)
 
 
 @cli.group()
@@ -684,8 +720,10 @@ def pair_list():
 def pair_get(name: str, output_json: bool, output_ai: bool):
     """Get combined ETF and OTC fund context"""
     if output_json or output_ai:
-        if not output_pair_context(name, output_json=output_json):
+        text = build_pair_context(name, output_json=output_json)
+        if text is None:
             sys.exit(1)
+        click.echo(text)
         return
 
     pairs = load_pairs()
