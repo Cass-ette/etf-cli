@@ -113,6 +113,32 @@ etf pnl --json
 4. Holdings-based proxy estimate when needed
 5. `cash`, `repo`, `reverse_repo`, `现金`, `逆回购` are treated as 0% change
 
+### Update holdings after buy/sell
+
+```bash
+# Sell 200 yuan of bank ETF
+etf holding adjust 159887 -200
+
+# Buy 500 yuan of Nasdaq fund
+etf holding adjust 270042 +500
+
+# Also works for cash changes
+etf holding adjust cash -500
+```
+
+### Portfolio history and terminal equity curve
+
+```bash
+# Save a snapshot of current portfolio (run daily after close)
+etf snapshot
+
+# Draw terminal equity curve from saved snapshots
+etf curve
+etf curve --last 90
+```
+
+Snapshots are stored in `~/.etf/snapshots.jsonl`. The curve shows total assets, return percentage, and max drawdown.
+
 ### Manage ETF watchlist
 
 ```bash

@@ -23,6 +23,7 @@ CONFIG_FILE = CONFIG_DIR / "watchlist.json"
 FUND_PAIR_FILE = CONFIG_DIR / "pairs.json"
 FUND_WATCH_FILE = CONFIG_DIR / "fund_watchlist.json"
 HOLDINGS_FILE = CONFIG_DIR / "holdings.json"
+SNAPSHOTS_FILE = CONFIG_DIR / "snapshots.jsonl"
 
 # API endpoints
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -1106,7 +1107,129 @@ def holding_remove(code: str):
     click.echo(f"Removed holding {code}")
 
 
+@holding.command("adjust", context_settings={"ignore_unknown_options": True})
+@click.argument("code")
+@click.argument("delta", type=click.UNPROCESSED)
+def holding_adjust(code: str, delta: str):
+    """Adjust holding amount by delta after buy/sell."""
+    delta_amount = float(delta)
+    holdings = load_holdings()
+    found = False
+    for h in holdings:
+        if h["code"] == code:
+            h["amount"] = float(h["amount"]) + delta_amount
+            found = True
+            new_amount = h["amount"]
+            break
+    if not found:
+        new_amount = delta_amount
+        holdings.append({"code": code, "amount": new_amount})
+    save_holdings(holdings)
+    click.echo(f"Adjusted holding {code}: {delta_amount:+.2f} -> {new_amount:.2f}")
+
+
 # ============ Fund Watchlist Commands ============
+
+@cli.command()
+def snapshot():
+    """Save current portfolio PnL snapshot to local history."""
+    import datetime
+    data = build_portfolio_pnl()
+    if data is None:
+        click.echo("No holdings configured. Use 'etf holding set <code> <amount>'.")
+        return
+    record = {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_amount": data["total_amount"],
+        "risk_amount": data["risk_amount"],
+        "cash_amount": data["cash_amount"],
+        "total_gain": data["total_gain"],
+        "total_pct": data["total_pct"],
+        "risk_pct": data["risk_pct"],
+    }
+    SNAPSHOTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SNAPSHOTS_FILE, "a") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    click.echo(f"Snapshot saved: {record['timestamp']} total={data['total_amount']:,.2f} gain={data['total_gain']:+,.2f}")
+
+
+def _render_sparkline(values, width=50, height=10):
+    """Render a terminal sparkline chart from numeric values using block characters."""
+    if not values:
+        return []
+    min_v = min(values)
+    max_v = max(values)
+    span = max_v - min_v if max_v != min_v else 1.0
+    rows = []
+    for row in range(height - 1, -1, -1):
+        threshold = min_v + span * row / (height - 1)
+        line_chars = []
+        for v in values:
+            if v >= threshold:
+                line_chars.append("█")
+            else:
+                line_chars.append(" ")
+        rows.append("".join(line_chars))
+    return rows
+
+
+@cli.command()
+@click.option("--last", "last_n", default=30, help="Number of recent snapshots to show")
+def curve(last_n: int):
+    """Draw terminal portfolio equity curve from saved snapshots."""
+    if not SNAPSHOTS_FILE.exists():
+        click.echo("No snapshots yet. Use 'etf snapshot' first.")
+        return
+    lines = SNAPSHOTS_FILE.read_text().strip().splitlines()
+    snapshots = [json.loads(line) for line in lines if line.strip()]
+    if not snapshots:
+        click.echo("No snapshots found.")
+        return
+    snapshots = snapshots[-last_n:]
+    values = [s["total_amount"] for s in snapshots]
+    chart_width = min(len(values), 60)
+    chart_height = 10
+    chart = _render_sparkline(values, width=chart_width, height=chart_height)
+
+    min_v = min(values)
+    max_v = max(values)
+    start = snapshots[0]
+    end = snapshots[-1]
+    total_return = (end["total_amount"] - start["total_amount"]) / start["total_amount"] * 100
+
+    # Draw chart with y-axis labels
+    click.echo(f"\n资产曲线  最近 {len(snapshots)} 条\n")
+    for i, row in enumerate(chart):
+        y_val = max_v - (max_v - min_v) * i / (chart_height - 1)
+        label = f"{y_val:>10,.0f}"
+        click.echo(f"{label} ┤ {row}")
+
+    click.echo(f"{'':>10} ┼{'─' * chart_width}")
+
+    # Draw x-axis labels
+    dates = [s["timestamp"][:10] for s in snapshots]
+    first_date = dates[0] if dates else ""
+    last_date = dates[-1] if dates else ""
+    click.echo(f"{'':>10}   {first_date}{' ' * max(chart_width - 20, 1)}{last_date}")
+
+    click.echo(f"\n起始: {start['total_amount']:,.0f} ({start['timestamp'][:10]})")
+    click.echo(f"当前: {end['total_amount']:,.0f} ({end['timestamp'][:10]})")
+    gain = end["total_amount"] - start["total_amount"]
+    sign = "+" if gain >= 0 else ""
+    color = "green" if gain >= 0 else "red"
+    click.echo(f"收益: {click.style(f'{sign}{gain:,.0f} / {sign}{total_return:.2f}%', fg=color)}")
+
+    # Max drawdown
+    peak = values[0]
+    max_dd = 0.0
+    for v in values:
+        if v > peak:
+            peak = v
+        dd = (v - peak) / peak * 100
+        if dd < max_dd:
+            max_dd = dd
+    click.echo(f"最大回撤: {max_dd:.2f}%")
+
 
 @cli.group()
 def fundw():

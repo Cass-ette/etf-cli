@@ -422,6 +422,66 @@ def test_holding_set_list_remove_commands(monkeypatch, tmp_path):
     assert json.loads((tmp_path / "holdings.json").read_text()) == []
 
 
+def test_curve_draws_terminal_asset_curve_from_snapshots(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "SNAPSHOTS_FILE", tmp_path / "snapshots.jsonl")
+    snapshots = [
+        {"timestamp": "2026-05-01 15:00", "total_amount": 40000.0, "risk_amount": 35000.0, "cash_amount": 5000.0, "total_gain": 0, "total_pct": 0, "risk_pct": 0},
+        {"timestamp": "2026-05-05 15:00", "total_amount": 40500.0, "risk_amount": 35500.0, "cash_amount": 5000.0, "total_gain": 500, "total_pct": 1.25, "risk_pct": 1.43},
+        {"timestamp": "2026-05-08 15:00", "total_amount": 39800.0, "risk_amount": 34800.0, "cash_amount": 5000.0, "total_gain": -200, "total_pct": -0.50, "risk_pct": -0.57},
+        {"timestamp": "2026-05-11 15:00", "total_amount": 41658.0, "risk_amount": 36500.0, "cash_amount": 5158.0, "total_gain": 1658, "total_pct": 4.15, "risk_pct": 4.43},
+    ]
+    (tmp_path / "snapshots.jsonl").write_text("\n".join(json.dumps(s) for s in snapshots))
+
+    result = CliRunner().invoke(etf.cli, ["curve"])
+
+    assert result.exit_code == 0
+    assert "资产曲线" in result.output
+    assert "41,658" in result.output
+    assert "40,000" in result.output
+    assert "+4.15%" in result.output
+
+
+def test_snapshot_appends_current_portfolio_pnl(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "SNAPSHOTS_FILE", tmp_path / "snapshots.jsonl")
+    monkeypatch.setattr(etf, "build_portfolio_pnl", lambda: {
+        "total_amount": 2000.0,
+        "risk_amount": 1000.0,
+        "cash_amount": 1000.0,
+        "total_gain": 100.0,
+        "total_pct": 5.0,
+        "risk_pct": 10.0,
+        "items": [],
+    })
+
+    result = CliRunner().invoke(etf.cli, ["snapshot"])
+
+    assert result.exit_code == 0
+    assert "Snapshot saved" in result.output
+    lines = (tmp_path / "snapshots.jsonl").read_text().splitlines()
+    assert len(lines) == 1
+    data = json.loads(lines[0])
+    assert data["total_amount"] == 2000.0
+    assert data["risk_pct"] == 10.0
+    assert "timestamp" in data
+
+
+def test_holding_adjust_adds_delta_and_creates_missing_holding(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "159887", "amount": 1000.0},
+    ]))
+
+    runner = CliRunner()
+    adjust_existing = runner.invoke(etf.cli, ["holding", "adjust", "159887", "-200"])
+    adjust_missing = runner.invoke(etf.cli, ["holding", "adjust", "270042", "500"])
+
+    assert adjust_existing.exit_code == 0
+    assert adjust_missing.exit_code == 0
+    holdings = {h["code"]: h["amount"] for h in json.loads((tmp_path / "holdings.json").read_text())}
+    assert holdings["159887"] == 800.0
+    assert holdings["270042"] == 500.0
+
+
 def test_pnl_estimates_total_gain_from_holdings(monkeypatch, tmp_path):
     monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
     monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
