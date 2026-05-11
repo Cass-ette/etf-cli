@@ -266,3 +266,162 @@ def test_smart_copy_copies_pair_ai_context(monkeypatch, tmp_path):
     assert copied
     assert "ETF / 场外基金配对行情上下文: robot" in copied[0]
     assert "ETF / 场外基金配对行情上下文: robot" in result.output
+
+
+# ============ Fund Watchlist Tests ============
+
+def test_fundw_add_saves_to_watchlist(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda code: etf.OTCFundQuote(
+        symbol="020404", name="易方达信创ETF联接C",
+        latest_nav=2.0, latest_nav_date="2026-05-08",
+        estimated_nav=2.1, estimated_change_pct=5.0,
+        estimate_time="2026-05-11 14:00",
+    ))
+    result = CliRunner().invoke(etf.cli, ["fundw", "add", "020404", "--ref", "159540"])
+    assert result.exit_code == 0
+    assert "易方达信创ETF联接C" in result.output
+    watchlist = json.loads((tmp_path / "fund_watchlist.json").read_text())
+    assert len(watchlist) == 1
+    assert watchlist[0]["code"] == "020404"
+    assert watchlist[0]["ref_etf"] == "159540"
+
+
+def test_fundw_add_rejects_duplicate(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C"},
+    ]))
+    result = CliRunner().invoke(etf.cli, ["fundw", "add", "020404"])
+    assert result.exit_code == 0
+    assert "already" in result.output
+
+
+def test_fundw_remove_deletes_from_watchlist(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C"},
+        {"code": "009447", "name": "财通科技创新"},
+    ]))
+    result = CliRunner().invoke(etf.cli, ["fundw", "remove", "020404"])
+    assert result.exit_code == 0
+    watchlist = json.loads((tmp_path / "fund_watchlist.json").read_text())
+    assert len(watchlist) == 1
+    assert watchlist[0]["code"] == "009447"
+
+
+def test_fundw_list_shows_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C", "ref_etf": "159540"},
+        {"code": "009447", "name": "财通科技创新"},
+    ]))
+    result = CliRunner().invoke(etf.cli, ["fundw", "list"])
+    assert result.exit_code == 0
+    assert "020404" in result.output
+    assert "009447" in result.output
+    assert "159540" in result.output
+
+
+def test_fundw_watch_shows_estimates(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C", "ref_etf": "159540"},
+    ]))
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda code: etf.OTCFundQuote(
+        symbol=code, name="易方达信创ETF联接C",
+        latest_nav=2.0, latest_nav_date="2026-05-08",
+        estimated_nav=2.1, estimated_change_pct=5.01,
+        estimate_time="2026-05-11 14:00",
+    ))
+    monkeypatch.setattr(etf, "fetch_quote", lambda code: etf.ETFQuote(
+        symbol="159540", name="信创ETF易方达", market="SZ",
+        latest=2.115, open=2.07, high=2.14, low=2.062,
+        prev_close=2.014, change_amount=0.101, change_pct=5.01,
+        volume=1505, amount=3315000,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["fundw", "watch"])
+    assert result.exit_code == 0
+    assert "020404" in result.output
+    assert "+5.01%" in result.output
+    assert "159540" in result.output
+
+
+def test_fundw_watch_json_output(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C", "ref_etf": "159540"},
+    ]))
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda code: etf.OTCFundQuote(
+        symbol=code, name="易方达信创ETF联接C",
+        latest_nav=2.0, latest_nav_date="2026-05-08",
+        estimated_nav=2.1, estimated_change_pct=5.01,
+        estimate_time="2026-05-11 14:00",
+    ))
+    monkeypatch.setattr(etf, "fetch_quote", lambda code: etf.ETFQuote(
+        symbol="159540", name="信创ETF易方达", market="SZ",
+        latest=2.115, open=2.07, high=2.14, low=2.062,
+        prev_close=2.014, change_amount=0.101, change_pct=5.01,
+        volume=1505, amount=3315000,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["fundw", "watch", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) == 1
+    assert data[0]["estimate_pct"] == 5.01
+    assert data[0]["ref_etf_pct"] == 5.01
+
+
+def test_est_command_shows_funds_and_pairs(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    monkeypatch.setattr(etf, "FUND_PAIR_FILE", tmp_path / "pairs.json")
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C", "ref_etf": "159540"},
+    ]))
+    (tmp_path / "pairs.json").write_text(json.dumps({
+        "robot": {"name": "robot", "etf": "562500", "fund": "018344"},
+    }))
+    monkeypatch.setattr(etf, "fetch_fund_quote", lambda code: etf.OTCFundQuote(
+        symbol=code, name="test fund",
+        latest_nav=1.0, latest_nav_date="2026-05-08",
+        estimated_nav=1.05, estimated_change_pct=2.42,
+        estimate_time="2026-05-11 14:00",
+    ))
+    monkeypatch.setattr(etf, "fetch_quote", lambda code: etf.ETFQuote(
+        symbol=code, name="test ETF", market="SH",
+        latest=1.0, open=1.0, high=1.0, low=1.0,
+        prev_close=1.0, change_amount=0.01, change_pct=1.5,
+        volume=100, amount=10000,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["est"])
+    assert result.exit_code == 0
+    assert "一键持仓估算" in result.output
+    assert "场外基金" in result.output
+    assert "场内+场外配对" in result.output
+    assert "020404" in result.output
+    assert "robot" in result.output
+
+
+def test_estimate_fund_by_holdings_weighted_average(monkeypatch):
+    fake_detail = {
+        "name": "财通科技创新",
+        "stock_ratio": 88.0,
+        "holdings": [
+            {"code": "688981", "name": "中芯国际", "weight": 9.5},
+            {"code": "002049", "name": "紫光国微", "weight": 8.2},
+        ],
+    }
+    monkeypatch.setattr(etf, "fetch_fund_holdings", lambda code: fake_detail)
+    stock_pcts = {"688981": 3.0, "002049": -1.0}
+    monkeypatch.setattr(etf, "fetch_stock_quote_pct", lambda code: stock_pcts.get(code))
+
+    result = etf.estimate_fund_by_holdings("009447")
+    assert result is not None
+    assert result["fund_code"] == "009447"
+    # weighted: (9.5*3 + 8.2*(-1)) / (9.5+8.2) = (28.5 - 8.2) / 17.7 = 1.147
+    assert abs(result["estimated_change_pct"] - 1.15) < 0.05
+    assert result["holdings_coverage"] == 17.7
+    assert len(result["holdings"]) == 2

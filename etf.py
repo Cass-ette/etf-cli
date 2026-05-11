@@ -21,12 +21,15 @@ import requests
 CONFIG_DIR = Path.home() / ".etf"
 CONFIG_FILE = CONFIG_DIR / "watchlist.json"
 FUND_PAIR_FILE = CONFIG_DIR / "pairs.json"
+FUND_WATCH_FILE = CONFIG_DIR / "fund_watchlist.json"
 
 # API endpoints
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 EASTMONEY_BATCH_URL = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q="
 TIANTIAN_FUND_URL = "https://fundgz.1234567.com.cn/js"
+EASTMONEY_FUND_DETAIL_URL = "https://fund.eastmoney.com/pingzhongdata/{}.js"
+EASTMONEY_STOCK_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 
 # Data provider registry
 DATA_PROVIDERS = {}
@@ -319,6 +322,128 @@ def fetch_fund_quote(symbol: str) -> Optional[OTCFundQuote]:
         )
     except Exception:
         return None
+
+
+def load_fund_watchlist() -> list:
+    if not FUND_WATCH_FILE.exists():
+        return []
+    return json.loads(FUND_WATCH_FILE.read_text())
+
+
+def save_fund_watchlist(watchlist: list) -> None:
+    FUND_WATCH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FUND_WATCH_FILE.write_text(json.dumps(watchlist, indent=2, ensure_ascii=False))
+
+
+def fetch_fund_holdings(fund_code: str) -> Optional[dict]:
+    """Fetch top holdings and stock ratio from Eastmoney fund detail page."""
+    import re
+    url = EASTMONEY_FUND_DETAIL_URL.format(fund_code)
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        text = resp.text
+
+        name_m = re.search(r'var fS_name = "([^"]+)";', text)
+        name = name_m.group(1) if name_m else "Unknown"
+
+        asset_m = re.search(r'var Data_assetAllocation = ({.*?});', text, re.S)
+        stock_ratio = None
+        if asset_m:
+            try:
+                asset_data = json.loads(asset_m.group(1))
+                series = asset_data.get("series", [])
+                for s in series:
+                    if s.get("name") == "股票占净比" and s.get("data"):
+                        stock_ratio = s["data"][-1]
+            except Exception:
+                pass
+
+        stock_m = re.search(r'var stockCodesNew = (\[.*?\]);', text, re.S)
+        holdings = []
+        if stock_m:
+            try:
+                raw = json.loads(stock_m.group(1))
+                for item in raw[:10]:
+                    if isinstance(item, str) and "," in item:
+                        parts = item.split(",")
+                        if len(parts) >= 3:
+                            holdings.append({
+                                "code": parts[0],
+                                "name": parts[1],
+                                "weight": float(parts[2]) if parts[2] else None,
+                            })
+            except Exception:
+                pass
+
+        return {
+            "name": name,
+            "stock_ratio": stock_ratio,
+            "holdings": holdings,
+        }
+    except Exception:
+        return None
+
+
+def fetch_stock_quote_pct(code: str) -> Optional[float]:
+    """Fetch a single stock's intraday change pct from Eastmoney."""
+    code = code.strip()
+    if code.startswith(("6", "9")):
+        secid = f"1.{code}"
+    else:
+        secid = f"0.{code}"
+    try:
+        resp = requests.get(EASTMONEY_STOCK_QUOTE_URL, params={
+            "secid": secid,
+            "fields": "f170",
+        }, timeout=10)
+        resp.raise_for_status()
+        data = resp.json().get("data")
+        if data and data.get("f170") is not None:
+            return data["f170"] / 100
+    except Exception:
+        pass
+    return None
+
+
+def estimate_fund_by_holdings(fund_code: str) -> Optional[dict]:
+    """Estimate fund's intraday change using top holdings weighted change."""
+    info = fetch_fund_holdings(fund_code)
+    if not info or not info["holdings"]:
+        return None
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    holding_details = []
+
+    for h in info["holdings"][:10]:
+        weight = h.get("weight")
+        if weight is None or weight <= 0:
+            continue
+        pct = fetch_stock_quote_pct(h["code"])
+        if pct is not None:
+            weighted_sum += weight * pct
+            total_weight += weight
+            holding_details.append({
+                "code": h["code"],
+                "name": h["name"],
+                "weight": weight,
+                "change_pct": round(pct, 2),
+            })
+
+    if total_weight == 0:
+        return None
+
+    estimated_pct = weighted_sum / total_weight
+
+    return {
+        "fund_code": fund_code,
+        "fund_name": info["name"],
+        "estimated_change_pct": round(estimated_pct, 2),
+        "holdings_coverage": round(total_weight, 1),
+        "stock_ratio": info.get("stock_ratio"),
+        "holdings": holding_details,
+    }
 
 
 def load_pairs() -> dict:
@@ -772,3 +897,150 @@ def watch():
 
 if __name__ == "__main__":
     cli()
+
+
+# ============ Fund Watchlist Commands ============
+
+@cli.group()
+def fundw():
+    """Manage OTC fund watchlist and estimates."""
+    pass
+
+
+@fundw.command("add")
+@click.argument("code")
+@click.option("--ref", "ref_etf", help="Reference exchange-traded ETF code")
+def fundw_add(code: str, ref_etf: Optional[str]):
+    """Add an OTC fund to watchlist, optionally bind to a reference ETF."""
+    watchlist = load_fund_watchlist()
+    if any(item["code"] == code for item in watchlist):
+        click.echo(f"{code} already in fund watchlist")
+        return
+    fund_q = fetch_fund_quote(code)
+    name = fund_q.name if fund_q else code
+    entry = {"code": code, "name": name}
+    if ref_etf:
+        entry["ref_etf"] = ref_etf.upper()
+    watchlist.append(entry)
+    save_fund_watchlist(watchlist)
+    ref_msg = f" -> ref ETF {ref_etf.upper()}" if ref_etf else ""
+    click.echo(f"Added fund {name} ({code}){ref_msg}")
+
+
+@fundw.command("remove")
+@click.argument("code")
+def fundw_remove(code: str):
+    """Remove an OTC fund from watchlist."""
+    watchlist = load_fund_watchlist()
+    original = len(watchlist)
+    watchlist = [item for item in watchlist if item["code"] != code]
+    if len(watchlist) == original:
+        click.echo(f"{code} not found in fund watchlist")
+        return
+    save_fund_watchlist(watchlist)
+    click.echo(f"Removed fund {code}")
+
+
+@fundw.command("list")
+def fundw_list():
+    """List OTC fund watchlist."""
+    watchlist = load_fund_watchlist()
+    if not watchlist:
+        click.echo("Fund watchlist is empty. Use 'etf fundw add <code> [--ref <etf>]'")
+        return
+    click.echo(f"\n{'代码':<10} {'名称':<30} {'参考ETF':<10}")
+    click.echo("-" * 55)
+    for item in watchlist:
+        ref = item.get("ref_etf", "")
+        click.echo(f"{item['code']:<10} {item['name']:<30} {ref:<10}")
+
+
+@fundw.command("watch")
+@click.option("--json", "output_json", is_flag=True)
+def fundw_watch(output_json: bool):
+    """Show all OTC funds with intraday estimate and reference ETF."""
+    watchlist = load_fund_watchlist()
+    if not watchlist:
+        click.echo("Fund watchlist is empty. Use 'etf fundw add <code>'")
+        return
+
+    results = []
+    for item in watchlist:
+        code = item["code"]
+        fund_q = fetch_fund_quote(code)
+        ref_etf = item.get("ref_etf")
+        ref_q = fetch_quote(ref_etf) if ref_etf else None
+        proxy = None
+        if fund_q is None or fund_q.estimated_change_pct is None:
+            proxy = estimate_fund_by_holdings(code)
+        results.append({
+            "code": code,
+            "name": fund_q.name if fund_q else (proxy["fund_name"] if proxy else item.get("name", code)),
+            "estimate_pct": fund_q.estimated_change_pct if fund_q and fund_q.estimated_change_pct else None,
+            "estimate_time": fund_q.estimate_time if fund_q else None,
+            "latest_nav": fund_q.latest_nav if fund_q else None,
+            "ref_etf": ref_etf,
+            "ref_etf_pct": ref_q.change_pct if ref_q else None,
+            "proxy_pct": proxy["estimated_change_pct"] if proxy else None,
+            "proxy_coverage": proxy["holdings_coverage"] if proxy else None,
+            "proxy_stock_ratio": proxy.get("stock_ratio") if proxy else None,
+        })
+
+    if output_json:
+        click.echo(json.dumps(results, indent=2, ensure_ascii=False))
+        return
+
+    click.echo("\n场外基金盘中估算\n")
+    click.echo(f"{'代码':<8} {'名称':<24} {'官方估算':>10} {'代理估算':>10} {'参考ETF':>10}")
+    click.echo("-" * 70)
+    for r in results:
+        est = f"{r['estimate_pct']:+.2f}%" if r["estimate_pct"] is not None else "N/A"
+        proxy = f"{r['proxy_pct']:+.2f}%" if r["proxy_pct"] is not None else ""
+        if r["ref_etf"] and r["ref_etf_pct"] is not None:
+            ref = f"{r['ref_etf']} {r['ref_etf_pct']:+.2f}%"
+        else:
+            ref = ""
+        click.echo(f"{r['code']:<8} {r['name']:<24} {est:>10} {proxy:>10} {ref:>10}")
+
+
+@cli.command()
+def est():
+    """One-click estimate: all fund watchlist + all pairs."""
+    import datetime
+    lines = []
+    lines.append("=" * 60)
+    lines.append("一键持仓估算")
+    lines.append(f"时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 60)
+
+    watchlist = load_fund_watchlist()
+    if watchlist:
+        lines.append("\n## 场外基金")
+        for item in watchlist:
+            code = item["code"]
+            fund_q = fetch_fund_quote(code)
+            ref_etf = item.get("ref_etf")
+            ref_q = fetch_quote(ref_etf) if ref_etf else None
+            proxy = None
+            if fund_q is None or fund_q.estimated_change_pct is None:
+                proxy = estimate_fund_by_holdings(code)
+            name = fund_q.name if fund_q else (proxy["fund_name"] if proxy else item.get("name", code))
+
+            est_str = f"官方估算 {fund_q.estimated_change_pct:+.2f}%" if fund_q and fund_q.estimated_change_pct is not None else ""
+            proxy_str = f"重仓估算 {proxy['estimated_change_pct']:+.2f}% (覆盖{proxy['holdings_coverage']:.0f}%)" if proxy else ""
+            ref_str = f"参考ETF {ref_q.name} {ref_q.change_pct:+.2f}%" if ref_q else ""
+            parts = [p for p in [est_str, proxy_str, ref_str] if p]
+            line = f"{name} ({code}): {' | '.join(parts) if parts else '暂无数据'}"
+            lines.append(f"  {line}")
+
+    pairs = load_pairs()
+    if pairs:
+        lines.append("\n## 场内+场外配对")
+        for name, item in pairs.items():
+            etf_q = fetch_quote(item["etf"])
+            fund_q = fetch_fund_quote(item["fund"])
+            etf_str = f"{etf_q.change_pct:+.2f}%" if etf_q else "N/A"
+            fund_str = f"{fund_q.estimated_change_pct:+.2f}%" if fund_q and fund_q.estimated_change_pct else "N/A"
+            lines.append(f"  {name}: 场内 {item['etf']} {etf_str} | 场外 {item['fund']} {fund_str}")
+
+    click.echo("\n".join(lines))
