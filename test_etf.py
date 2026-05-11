@@ -441,6 +441,25 @@ def test_curve_draws_terminal_asset_curve_from_snapshots(monkeypatch, tmp_path):
     assert "+4.15%" in result.output
 
 
+def test_curve_default_uses_line_chart_and_bar_option_keeps_blocks(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "SNAPSHOTS_FILE", tmp_path / "snapshots.jsonl")
+    snapshots = [
+        {"timestamp": "2026-05-01 15:00", "total_amount": 40000.0, "risk_amount": 35000.0, "cash_amount": 5000.0, "total_gain": 0, "total_pct": 0, "risk_pct": 0},
+        {"timestamp": "2026-05-05 15:00", "total_amount": 40500.0, "risk_amount": 35500.0, "cash_amount": 5000.0, "total_gain": 500, "total_pct": 1.25, "risk_pct": 1.43},
+        {"timestamp": "2026-05-08 15:00", "total_amount": 39800.0, "risk_amount": 34800.0, "cash_amount": 5000.0, "total_gain": -200, "total_pct": -0.50, "risk_pct": -0.57},
+        {"timestamp": "2026-05-11 15:00", "total_amount": 41658.0, "risk_amount": 36500.0, "cash_amount": 5158.0, "total_gain": 1658, "total_pct": 4.15, "risk_pct": 4.43},
+    ]
+    (tmp_path / "snapshots.jsonl").write_text("\n".join(json.dumps(s) for s in snapshots))
+
+    line_result = CliRunner().invoke(etf.cli, ["curve"])
+    bar_result = CliRunner().invoke(etf.cli, ["curve", "--bar"])
+
+    assert line_result.exit_code == 0
+    assert bar_result.exit_code == 0
+    assert any(ch in line_result.output for ch in "╭╮╯╰─")
+    assert "█" in bar_result.output
+
+
 def test_snapshot_appends_current_portfolio_pnl(monkeypatch, tmp_path):
     monkeypatch.setattr(etf, "SNAPSHOTS_FILE", tmp_path / "snapshots.jsonl")
     monkeypatch.setattr(etf, "build_portfolio_pnl", lambda: {

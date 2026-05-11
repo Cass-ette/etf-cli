@@ -132,9 +132,12 @@ etf holding adjust cash -500
 # Save a snapshot of current portfolio (run daily after close)
 etf snapshot
 
-# Draw terminal equity curve from saved snapshots
+# Draw terminal line curve from saved snapshots
 etf curve
 etf curve --last 90
+
+# Show bar/area chart instead
+etf curve --bar
 ```
 
 Snapshots are stored in `~/.etf/snapshots.jsonl`. The curve shows total assets, return percentage, and max drawdown.

@@ -1153,8 +1153,8 @@ def snapshot():
     click.echo(f"Snapshot saved: {record['timestamp']} total={data['total_amount']:,.2f} gain={data['total_gain']:+,.2f}")
 
 
-def _render_sparkline(values, width=50, height=10):
-    """Render a terminal sparkline chart from numeric values using block characters."""
+def _render_bar_chart(values, width=50, height=10):
+    """Render a terminal bar/area chart from numeric values using block characters."""
     if not values:
         return []
     min_v = min(values)
@@ -1173,9 +1173,48 @@ def _render_sparkline(values, width=50, height=10):
     return rows
 
 
+def _render_line_chart(values, height=10):
+    """Render a simple terminal line chart using box-drawing characters."""
+    if not values:
+        return []
+    min_v = min(values)
+    max_v = max(values)
+    span = max_v - min_v if max_v != min_v else 1.0
+    points = []
+    for v in values:
+        y = round((max_v - v) / span * (height - 1))
+        points.append(y)
+
+    grid = [[" " for _ in values] for _ in range(height)]
+    for i, y in enumerate(points):
+        if i == 0:
+            char = "╭" if len(points) > 1 and points[1] < y else "╰" if len(points) > 1 and points[1] > y else "─"
+        elif i == len(points) - 1:
+            prev = points[i - 1]
+            char = "╯" if prev < y else "╮" if prev > y else "─"
+        else:
+            prev = points[i - 1]
+            nxt = points[i + 1]
+            if prev == y and nxt == y:
+                char = "─"
+            elif prev > y and nxt >= y:
+                char = "╰"
+            elif prev < y and nxt <= y:
+                char = "╭"
+            elif prev < y and nxt > y:
+                char = "╮"
+            elif prev > y and nxt < y:
+                char = "╯"
+            else:
+                char = "│"
+        grid[y][i] = char
+    return ["".join(row) for row in grid]
+
+
 @cli.command()
 @click.option("--last", "last_n", default=30, help="Number of recent snapshots to show")
-def curve(last_n: int):
+@click.option("--bar", "bar_chart", is_flag=True, help="Show bar/area chart instead of line chart")
+def curve(last_n: int, bar_chart: bool):
     """Draw terminal portfolio equity curve from saved snapshots."""
     if not SNAPSHOTS_FILE.exists():
         click.echo("No snapshots yet. Use 'etf snapshot' first.")
@@ -1189,7 +1228,7 @@ def curve(last_n: int):
     values = [s["total_amount"] for s in snapshots]
     chart_width = min(len(values), 60)
     chart_height = 10
-    chart = _render_sparkline(values, width=chart_width, height=chart_height)
+    chart = _render_bar_chart(values, width=chart_width, height=chart_height) if bar_chart else _render_line_chart(values, height=chart_height)
 
     min_v = min(values)
     max_v = max(values)
