@@ -522,6 +522,8 @@ def build_portfolio_pnl() -> Optional[dict]:
 
     items = []
     total_amount = 0.0
+    risk_amount = 0.0
+    cash_amount = 0.0
     total_gain = 0.0
     for h in holdings:
         amount = float(h["amount"])
@@ -529,7 +531,12 @@ def build_portfolio_pnl() -> Optional[dict]:
         if estimate:
             pct = estimate["change_pct"]
             gain = amount * pct / 100
+            is_cash = estimate["source"] == "cash"
             total_gain += gain
+            if is_cash:
+                cash_amount += amount
+            else:
+                risk_amount += amount
             items.append({
                 "code": h["code"],
                 "name": estimate["name"],
@@ -537,8 +544,10 @@ def build_portfolio_pnl() -> Optional[dict]:
                 "change_pct": pct,
                 "gain": gain,
                 "source": estimate["source"],
+                "is_cash": is_cash,
             })
         else:
+            risk_amount += amount
             items.append({
                 "code": h["code"],
                 "name": h["code"],
@@ -546,14 +555,19 @@ def build_portfolio_pnl() -> Optional[dict]:
                 "change_pct": None,
                 "gain": None,
                 "source": "missing",
+                "is_cash": False,
             })
         total_amount += amount
 
     total_pct = total_gain / total_amount * 100 if total_amount else 0.0
+    risk_pct = total_gain / risk_amount * 100 if risk_amount else 0.0
     return {
         "total_amount": total_amount,
+        "risk_amount": risk_amount,
+        "cash_amount": cash_amount,
         "total_gain": total_gain,
         "total_pct": total_pct,
+        "risk_pct": risk_pct,
         "items": items,
     }
 
@@ -1029,10 +1043,14 @@ def pnl(output_json: bool):
     color = "green" if data["total_gain"] >= 0 else "red"
     sign = "+" if data["total_gain"] >= 0 else ""
     pct_sign = "+" if data["total_pct"] >= 0 else ""
+    risk_pct_sign = "+" if data["risk_pct"] >= 0 else ""
     click.echo("\n组合实时估算\n")
-    click.echo(f"总市值: {data['total_amount']:,.2f}")
+    click.echo(f"总资产: {data['total_amount']:,.2f}")
+    click.echo(f"风险资产: {data['risk_amount']:,.2f}")
+    click.echo(f"现金/逆回购: {data['cash_amount']:,.2f}")
     click.echo(f"今日估算盈亏: {click.style(f'{sign}{data['total_gain']:,.2f}', fg=color)}")
-    click.echo(f"今日估算涨跌幅: {click.style(f'{pct_sign}{data['total_pct']:.2f}%', fg=color)}")
+    click.echo(f"总资产涨跌幅: {click.style(f'{pct_sign}{data['total_pct']:.2f}%', fg=color)}")
+    click.echo(f"风险资产涨跌幅: {click.style(f'{risk_pct_sign}{data['risk_pct']:.2f}%', fg=color)}")
     click.echo(f"\n{'代码':<8} {'名称':<24} {'金额':>10} {'涨跌':>8} {'盈亏':>10} {'来源':>12}")
     click.echo("-" * 80)
     for item in data["items"]:

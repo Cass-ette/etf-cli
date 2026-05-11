@@ -459,11 +459,32 @@ def test_pnl_estimates_total_gain_from_holdings(monkeypatch, tmp_path):
 
     assert result.exit_code == 0
     assert "组合实时估算" in result.output
-    assert "总市值: 3,612.12" in result.output
+    assert "总资产: 3,612.12" in result.output
+    assert "风险资产: 3,612.12" in result.output
     assert "020404" in result.output
     assert "024620" in result.output
     # 561.89*5.56% + 3050.23*1.66% = 81.874902
     assert "+81.87" in result.output
+
+
+def test_pnl_excludes_cash_from_risk_asset_percentage(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "512800", "amount": 1000.0},
+        {"code": "cash", "amount": 1000.0},
+    ]))
+    monkeypatch.setattr(etf, "fetch_quote", lambda code: etf.ETFQuote(
+        symbol=code, name="银行ETF华宝", market="SH",
+        latest=1.1, open=1.0, high=1.1, low=1.0,
+        prev_close=1.0, change_amount=0.1, change_pct=10.0,
+        volume=100, amount=10000,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["pnl"])
+
+    assert result.exit_code == 0
+    assert "总资产涨跌幅: +5.00%" in result.output
+    assert "风险资产涨跌幅: +10.00%" in result.output
 
 
 def test_pnl_treats_cash_as_zero_change(monkeypatch, tmp_path):

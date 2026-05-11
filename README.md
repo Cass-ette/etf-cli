@@ -100,6 +100,11 @@ etf pnl
 etf pnl --json
 ```
 
+`etf pnl` reports both:
+
+- **Total asset return**: today's estimated gain/loss divided by all configured holdings, including cash/repo
+- **Risk asset return**: today's estimated gain/loss divided only by non-cash holdings
+
 `etf pnl` uses the best available intraday estimate:
 
 1. Exchange-traded ETF quote for ETF codes
