@@ -463,6 +463,14 @@ def resolve_holding_estimate(code: str) -> Optional[dict]:
     fund_watch = {item["code"]: item for item in load_fund_watchlist()}
     item = fund_watch.get(code, {"code": code, "name": code})
 
+    if code.lower() in {"cash", "repo", "reverse_repo", "逆回购", "现金"}:
+        return {
+            "code": code,
+            "name": "现金/国债逆回购",
+            "change_pct": 0.0,
+            "source": "cash",
+        }
+
     # Exchange-traded ETF: use real-time quote directly
     if is_exchange_traded_etf_code(code):
         etf_q = fetch_quote(code)

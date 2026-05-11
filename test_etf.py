@@ -466,6 +466,19 @@ def test_pnl_estimates_total_gain_from_holdings(monkeypatch, tmp_path):
     assert "+81.87" in result.output
 
 
+def test_pnl_treats_cash_as_zero_change(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "cash", "amount": 1000.0},
+    ]))
+    result = CliRunner().invoke(etf.cli, ["pnl"])
+    assert result.exit_code == 0
+    assert "cash" in result.output
+    assert "+0.00" in result.output
+    assert "现金" in result.output
+    assert "cash" in result.output
+
+
 def test_pnl_includes_exchange_traded_etf_holdings(monkeypatch, tmp_path):
     monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
     (tmp_path / "holdings.json").write_text(json.dumps([

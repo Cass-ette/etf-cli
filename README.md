@@ -83,6 +83,31 @@ etf fundw remove 020404
 etf est
 ```
 
+### Manage holding amounts and portfolio PnL
+
+```bash
+# Set current holding amount by code
+etf holding set 020404 561.89
+etf holding set 159887 12150.50
+etf holding set cash 7125.69
+
+# List/remove holdings
+etf holding list
+etf holding remove 020404
+
+# Estimate whole portfolio intraday gain/loss
+etf pnl
+etf pnl --json
+```
+
+`etf pnl` uses the best available intraday estimate:
+
+1. Exchange-traded ETF quote for ETF codes
+2. Official OTC fund estimate when available
+3. Reference ETF if bound through `fundw add --ref`
+4. Holdings-based proxy estimate when needed
+5. `cash`, `repo`, `reverse_repo`, `现金`, `逆回购` are treated as 0% change
+
 ### Manage ETF watchlist
 
 ```bash
