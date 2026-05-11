@@ -9,6 +9,7 @@ import json
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Optional, Callable
 from dataclasses import dataclass, asdict
@@ -35,6 +36,34 @@ EASTMONEY_STOCK_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
 
 # Data provider registry
 DATA_PROVIDERS = {}
+
+
+def display_width(text: str) -> int:
+    """Return terminal display width, treating East Asian wide chars as width 2."""
+    width = 0
+    for ch in str(text):
+        width += 2 if unicodedata.east_asian_width(ch) in {"F", "W"} else 1
+    return width
+
+
+def truncate_display(text: str, width: int) -> str:
+    result = ""
+    current = 0
+    for ch in str(text):
+        ch_width = 2 if unicodedata.east_asian_width(ch) in {"F", "W"} else 1
+        if current + ch_width > width:
+            break
+        result += ch
+        current += ch_width
+    return result
+
+
+def pad_display(text: str, width: int, align: str = "left") -> str:
+    text = truncate_display(str(text), width)
+    padding = max(width - display_width(text), 0)
+    if align == "right":
+        return " " * padding + text
+    return text + " " * padding
 
 
 def register_provider(name: str):
@@ -1052,8 +1081,16 @@ def pnl(output_json: bool):
     click.echo(f"今日估算盈亏: {click.style(f'{sign}{data['total_gain']:,.2f}', fg=color)}")
     click.echo(f"总资产涨跌幅: {click.style(f'{pct_sign}{data['total_pct']:.2f}%', fg=color)}")
     click.echo(f"风险资产涨跌幅: {click.style(f'{risk_pct_sign}{data['risk_pct']:.2f}%', fg=color)}")
-    click.echo(f"\n{'代码':<8} {'名称':<24} {'金额':>10} {'涨跌':>8} {'盈亏':>10} {'来源':>12}")
-    click.echo("-" * 80)
+    header = " ".join([
+        pad_display("代码", 8),
+        pad_display("名称", 36),
+        pad_display("金额", 12, align="right"),
+        pad_display("涨跌", 8, align="right"),
+        pad_display("盈亏", 10, align="right"),
+        pad_display("来源", 12, align="right"),
+    ])
+    click.echo(f"\n{header}")
+    click.echo("-" * display_width(header))
     for item in data["items"]:
         if item["change_pct"] is None:
             pct = "N/A"
@@ -1063,7 +1100,14 @@ def pnl(output_json: bool):
             item_color = "green" if item["gain"] >= 0 else "red"
             pct = f"{item['change_pct']:+.2f}%"
             gain = f"{item['gain']:+,.2f}"
-        line = f"{item['code']:<8} {item['name']:<24} {item['amount']:>10,.2f} {pct:>8} {gain:>10} {item['source']:>12}"
+        line = " ".join([
+            pad_display(item["code"], 8),
+            pad_display(item["name"], 36),
+            pad_display(f"{item['amount']:,.2f}", 12, align="right"),
+            pad_display(pct, 8, align="right"),
+            pad_display(gain, 10, align="right"),
+            pad_display(item["source"], 12, align="right"),
+        ])
         click.echo(click.style(line, fg=item_color) if item_color else line)
 
 

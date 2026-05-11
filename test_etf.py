@@ -422,6 +422,15 @@ def test_holding_set_list_remove_commands(monkeypatch, tmp_path):
     assert json.loads((tmp_path / "holdings.json").read_text()) == []
 
 
+def test_display_width_padding_handles_chinese_names():
+    padded = etf.pad_display("国泰黄金ETF联接C", 24)
+    assert etf.display_width(padded) == 24
+    assert padded.endswith(" ")
+
+    truncated = etf.pad_display("广发纳斯达克100ETF联接人民币(QDII)A", 24)
+    assert etf.display_width(truncated) == 24
+
+
 def test_curve_draws_terminal_asset_curve_from_snapshots(monkeypatch, tmp_path):
     monkeypatch.setattr(etf, "SNAPSHOTS_FILE", tmp_path / "snapshots.jsonl")
     snapshots = [
@@ -499,6 +508,31 @@ def test_holding_adjust_adds_delta_and_creates_missing_holding(monkeypatch, tmp_
     holdings = {h["code"]: h["amount"] for h in json.loads((tmp_path / "holdings.json").read_text())}
     assert holdings["159887"] == 800.0
     assert holdings["270042"] == 500.0
+
+
+def test_pnl_table_uses_display_width_for_chinese_names(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "270042", "amount": 3039.58},
+        {"code": "cash", "amount": 7125.69},
+    ]))
+
+    def fake_resolve(code):
+        if code == "270042":
+            return {"code": code, "name": "广发纳斯达克100ETF联接人民币(QDII)A", "change_pct": -0.06, "source": "official"}
+        return {"code": code, "name": "现金/国债逆回购", "change_pct": 0.0, "source": "cash"}
+
+    monkeypatch.setattr(etf, "resolve_holding_estimate", fake_resolve)
+
+    result = CliRunner().invoke(etf.cli, ["pnl"])
+
+    assert result.exit_code == 0
+    rows = [line for line in result.output.splitlines() if line.startswith(("270042", "cash"))]
+    amount_prefix_widths = []
+    for line in rows:
+        amount = "3,039.58" if "3,039.58" in line else "7,125.69"
+        amount_prefix_widths.append(etf.display_width(line[:line.index(amount)]))
+    assert len(set(amount_prefix_widths)) == 1
 
 
 def test_pnl_estimates_total_gain_from_holdings(monkeypatch, tmp_path):
