@@ -22,6 +22,7 @@ CONFIG_DIR = Path.home() / ".etf"
 CONFIG_FILE = CONFIG_DIR / "watchlist.json"
 FUND_PAIR_FILE = CONFIG_DIR / "pairs.json"
 FUND_WATCH_FILE = CONFIG_DIR / "fund_watchlist.json"
+HOLDINGS_FILE = CONFIG_DIR / "holdings.json"
 
 # API endpoints
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -443,6 +444,109 @@ def estimate_fund_by_holdings(fund_code: str) -> Optional[dict]:
         "holdings_coverage": round(total_weight, 1),
         "stock_ratio": info.get("stock_ratio"),
         "holdings": holding_details,
+    }
+
+
+def load_holdings() -> list:
+    if not HOLDINGS_FILE.exists():
+        return []
+    return json.loads(HOLDINGS_FILE.read_text())
+
+
+def save_holdings(holdings: list) -> None:
+    HOLDINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    HOLDINGS_FILE.write_text(json.dumps(holdings, indent=2, ensure_ascii=False))
+
+
+def resolve_holding_estimate(code: str) -> Optional[dict]:
+    """Resolve best available intraday estimate for a holding."""
+    fund_watch = {item["code"]: item for item in load_fund_watchlist()}
+    item = fund_watch.get(code, {"code": code, "name": code})
+
+    # Exchange-traded ETF: use real-time quote directly
+    if is_exchange_traded_etf_code(code):
+        etf_q = fetch_quote(code)
+        if etf_q:
+            return {
+                "code": code,
+                "name": etf_q.name,
+                "change_pct": etf_q.change_pct,
+                "source": "etf",
+            }
+
+    # OTC fund: try official estimate first
+    fund_q = fetch_fund_quote(code)
+    if fund_q and fund_q.estimated_change_pct is not None:
+        return {
+            "code": code,
+            "name": fund_q.name,
+            "change_pct": fund_q.estimated_change_pct,
+            "source": "official",
+        }
+
+    ref_etf = item.get("ref_etf")
+    if ref_etf:
+        ref_q = fetch_quote(ref_etf)
+        if ref_q:
+            return {
+                "code": code,
+                "name": fund_q.name if fund_q else item.get("name", code),
+                "change_pct": ref_q.change_pct,
+                "source": f"ref:{ref_etf}",
+            }
+
+    proxy = estimate_fund_by_holdings(code)
+    if proxy:
+        return {
+            "code": code,
+            "name": proxy["fund_name"],
+            "change_pct": proxy["estimated_change_pct"],
+            "source": f"holdings:{proxy['holdings_coverage']:.0f}%",
+        }
+
+    return None
+
+
+def build_portfolio_pnl() -> Optional[dict]:
+    holdings = load_holdings()
+    if not holdings:
+        return None
+
+    items = []
+    total_amount = 0.0
+    total_gain = 0.0
+    for h in holdings:
+        amount = float(h["amount"])
+        estimate = resolve_holding_estimate(h["code"])
+        if estimate:
+            pct = estimate["change_pct"]
+            gain = amount * pct / 100
+            total_gain += gain
+            items.append({
+                "code": h["code"],
+                "name": estimate["name"],
+                "amount": amount,
+                "change_pct": pct,
+                "gain": gain,
+                "source": estimate["source"],
+            })
+        else:
+            items.append({
+                "code": h["code"],
+                "name": h["code"],
+                "amount": amount,
+                "change_pct": None,
+                "gain": None,
+                "source": "missing",
+            })
+        total_amount += amount
+
+    total_pct = total_gain / total_amount * 100 if total_amount else 0.0
+    return {
+        "total_amount": total_amount,
+        "total_gain": total_gain,
+        "total_pct": total_pct,
+        "items": items,
     }
 
 
@@ -897,6 +1001,83 @@ def watch():
 
 if __name__ == "__main__":
     cli()
+
+
+# ============ Portfolio PnL Commands ============
+
+@cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output JSON")
+def pnl(output_json: bool):
+    """Estimate today's portfolio PnL from configured holdings."""
+    data = build_portfolio_pnl()
+    if data is None:
+        click.echo("No holdings configured. Use 'etf holding set <code> <amount>'.")
+        return
+
+    if output_json:
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    color = "green" if data["total_gain"] >= 0 else "red"
+    sign = "+" if data["total_gain"] >= 0 else ""
+    pct_sign = "+" if data["total_pct"] >= 0 else ""
+    click.echo("\n组合实时估算\n")
+    click.echo(f"总市值: {data['total_amount']:,.2f}")
+    click.echo(f"今日估算盈亏: {click.style(f'{sign}{data['total_gain']:,.2f}', fg=color)}")
+    click.echo(f"今日估算涨跌幅: {click.style(f'{pct_sign}{data['total_pct']:.2f}%', fg=color)}")
+    click.echo(f"\n{'代码':<8} {'名称':<24} {'金额':>10} {'涨跌':>8} {'盈亏':>10} {'来源':>12}")
+    click.echo("-" * 80)
+    for item in data["items"]:
+        if item["change_pct"] is None:
+            pct = "N/A"
+            gain = "N/A"
+            item_color = None
+        else:
+            item_color = "green" if item["gain"] >= 0 else "red"
+            pct = f"{item['change_pct']:+.2f}%"
+            gain = f"{item['gain']:+,.2f}"
+        line = f"{item['code']:<8} {item['name']:<24} {item['amount']:>10,.2f} {pct:>8} {gain:>10} {item['source']:>12}"
+        click.echo(click.style(line, fg=item_color) if item_color else line)
+
+
+# ============ Holdings Commands ============
+
+@cli.group()
+def holding():
+    """Manage holding amounts."""
+    pass
+
+
+@holding.command("set")
+@click.argument("code")
+@click.argument("amount", type=float)
+def holding_set(code: str, amount: float):
+    holdings = load_holdings()
+    holdings = [h for h in holdings if h["code"] != code]
+    holdings.append({"code": code, "amount": amount})
+    save_holdings(holdings)
+    click.echo(f"Set holding {code}: {amount:.2f}")
+
+
+@holding.command("list")
+def holding_list():
+    holdings = load_holdings()
+    if not holdings:
+        click.echo("No holdings configured. Use 'etf holding set <code> <amount>'.")
+        return
+    click.echo(f"\n{'代码':<10} {'金额':>12}")
+    click.echo("-" * 25)
+    for h in holdings:
+        click.echo(f"{h['code']:<10} {h['amount']:>12.2f}")
+
+
+@holding.command("remove")
+@click.argument("code")
+def holding_remove(code: str):
+    holdings = load_holdings()
+    holdings = [h for h in holdings if h["code"] != code]
+    save_holdings(holdings)
+    click.echo(f"Removed holding {code}")
 
 
 # ============ Fund Watchlist Commands ============

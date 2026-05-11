@@ -405,6 +405,88 @@ def test_est_command_shows_funds_and_pairs(monkeypatch, tmp_path):
     assert "robot" in result.output
 
 
+def test_holding_set_list_remove_commands(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    runner = CliRunner()
+
+    set_result = runner.invoke(etf.cli, ["holding", "set", "020404", "561.89"])
+    list_result = runner.invoke(etf.cli, ["holding", "list"])
+    remove_result = runner.invoke(etf.cli, ["holding", "remove", "020404"])
+
+    assert set_result.exit_code == 0
+    assert "020404" in set_result.output
+    assert list_result.exit_code == 0
+    assert "020404" in list_result.output
+    assert "561.89" in list_result.output
+    assert remove_result.exit_code == 0
+    assert json.loads((tmp_path / "holdings.json").read_text()) == []
+
+
+def test_pnl_estimates_total_gain_from_holdings(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    monkeypatch.setattr(etf, "FUND_WATCH_FILE", tmp_path / "fund_watchlist.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "020404", "amount": 561.89},
+        {"code": "024620", "amount": 3050.23},
+    ]))
+    (tmp_path / "fund_watchlist.json").write_text(json.dumps([
+        {"code": "020404", "name": "易方达信创ETF联接C", "ref_etf": "159540"},
+        {"code": "024620", "name": "嘉实机器人ETF联接C", "ref_etf": "159526"},
+    ]))
+
+    def fake_fund_quote(code):
+        if code == "020404":
+            return None
+        return etf.OTCFundQuote(
+            symbol=code, name="嘉实机器人ETF联接C",
+            latest_nav=1.0, latest_nav_date="2026-05-08",
+            estimated_nav=1.02, estimated_change_pct=1.66,
+            estimate_time="2026-05-11 14:00",
+        )
+
+    def fake_quote(code):
+        return etf.ETFQuote(
+            symbol=code, name="ref ETF", market="SZ",
+            latest=1.0, open=1.0, high=1.0, low=1.0,
+            prev_close=1.0, change_amount=0.05, change_pct=5.56,
+            volume=100, amount=10000,
+        )
+
+    monkeypatch.setattr(etf, "fetch_fund_quote", fake_fund_quote)
+    monkeypatch.setattr(etf, "fetch_quote", fake_quote)
+
+    result = CliRunner().invoke(etf.cli, ["pnl"])
+
+    assert result.exit_code == 0
+    assert "组合实时估算" in result.output
+    assert "总市值: 3,612.12" in result.output
+    assert "020404" in result.output
+    assert "024620" in result.output
+    # 561.89*5.56% + 3050.23*1.66% = 81.874902
+    assert "+81.87" in result.output
+
+
+def test_pnl_includes_exchange_traded_etf_holdings(monkeypatch, tmp_path):
+    monkeypatch.setattr(etf, "HOLDINGS_FILE", tmp_path / "holdings.json")
+    (tmp_path / "holdings.json").write_text(json.dumps([
+        {"code": "512800", "amount": 12141.00},
+    ]))
+    monkeypatch.setattr(etf, "fetch_quote", lambda code: etf.ETFQuote(
+        symbol=code, name="银行ETF华宝", market="SH",
+        latest=0.783, open=0.784, high=0.784, low=0.779,
+        prev_close=0.785, change_amount=-0.002, change_pct=-0.25,
+        volume=100, amount=10000,
+    ))
+
+    result = CliRunner().invoke(etf.cli, ["pnl"])
+
+    assert result.exit_code == 0
+    assert "512800" in result.output
+    assert "银行ETF华宝" in result.output
+    assert "-30.35" in result.output
+    assert "etf" in result.output
+
+
 def test_estimate_fund_by_holdings_weighted_average(monkeypatch):
     fake_detail = {
         "name": "财通科技创新",
