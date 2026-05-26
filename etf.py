@@ -18,6 +18,8 @@ import time
 
 import click
 import requests
+import plotext as plt
+import builtins
 
 CONFIG_DIR = Path.home() / ".etf"
 CONFIG_FILE = CONFIG_DIR / "watchlist.json"
@@ -25,6 +27,7 @@ FUND_PAIR_FILE = CONFIG_DIR / "pairs.json"
 FUND_WATCH_FILE = CONFIG_DIR / "fund_watchlist.json"
 HOLDINGS_FILE = CONFIG_DIR / "holdings.json"
 SNAPSHOTS_FILE = CONFIG_DIR / "snapshots.jsonl"
+CONTEXT_FILE = CONFIG_DIR / "context.md"
 
 # API endpoints
 EASTMONEY_QUOTE_URL = "https://push2.eastmoney.com/api/qt/stock/get"
@@ -1217,83 +1220,142 @@ def _render_bar_chart(values, width=50, height=10):
     return rows
 
 
-def _render_line_chart(values, height=10):
-    """Render a simple terminal line chart using box-drawing characters."""
+def _render_line_chart(values, width=50, height=10):
+    """Render a terminal line chart."""
     if not values:
         return []
     min_v = min(values)
     max_v = max(values)
     span = max_v - min_v if max_v != min_v else 1.0
-    points = []
-    for v in values:
-        y = round((max_v - v) / span * (height - 1))
-        points.append(y)
+    if len(values) == 1:
+        columns = [0]
+        width = 1
+    else:
+        width = max(width, len(values))
+        columns = [round(i * (width - 1) / (len(values) - 1)) for i in range(len(values))]
+    rows = [round((max_v - v) / span * (height - 1)) for v in values]
 
-    grid = [[" " for _ in values] for _ in range(height)]
-    for i, y in enumerate(points):
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    for i, (x, y) in enumerate(zip(columns, rows)):
+        grid[y][x] = "•"
         if i == 0:
-            char = "╭" if len(points) > 1 and points[1] < y else "╰" if len(points) > 1 and points[1] > y else "─"
-        elif i == len(points) - 1:
-            prev = points[i - 1]
-            char = "╯" if prev < y else "╮" if prev > y else "─"
-        else:
-            prev = points[i - 1]
-            nxt = points[i + 1]
-            if prev == y and nxt == y:
-                char = "─"
-            elif prev > y and nxt >= y:
-                char = "╰"
-            elif prev < y and nxt <= y:
-                char = "╭"
-            elif prev < y and nxt > y:
-                char = "╮"
-            elif prev > y and nxt < y:
-                char = "╯"
+            continue
+        prev_x = columns[i - 1]
+        prev_y = rows[i - 1]
+        dx = x - prev_x
+        if dx <= 0:
+            continue
+        for step in range(1, dx):
+            t = step / dx
+            yy = round(prev_y + (y - prev_y) * t)
+            if yy == prev_y == y:
+                ch = "─"
+            elif y < prev_y:
+                ch = "╱"
             else:
-                char = "│"
-        grid[y][i] = char
+                ch = "╲"
+            grid[yy][prev_x + step] = ch
     return ["".join(row) for row in grid]
 
 
+def _last_snapshot_per_day(snapshots):
+    daily = {}
+    for snapshot in snapshots:
+        daily[snapshot["timestamp"][:10]] = snapshot
+    return [*daily.values()]
+
+
+def _load_snapshots():
+    if not SNAPSHOTS_FILE.exists():
+        return []
+    lines = SNAPSHOTS_FILE.read_text().strip().splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
 @cli.command()
-@click.option("--last", "last_n", default=30, help="Number of recent snapshots to show")
+def brief():
+    """Print portfolio context for continuing in a new Claude window."""
+    data = build_portfolio_pnl()
+    if data is None:
+        click.echo("No holdings configured. Use 'etf holding set <code> <amount>'.")
+        return
+
+    exchange_gain = sum(item["gain"] or 0 for item in data["items"] if item["source"] == "etf")
+    otc_gain = sum(item["gain"] or 0 for item in data["items"] if item["source"] != "etf" and not item["is_cash"])
+    snapshots = _last_snapshot_per_day(_load_snapshots())[-5:]
+
+    click.echo("ETF 投资上下文简报")
+    click.echo("")
+    click.echo(f"总资产: {data['total_amount']:,.2f}")
+    click.echo(f"风险资产: {data['risk_amount']:,.2f}")
+    click.echo(f"现金/低风险: {data['cash_amount']:,.2f}")
+    click.echo(f"今日估算盈亏: {data['total_gain']:+,.2f}")
+    click.echo(f"场内估算盈亏: {exchange_gain:+,.2f}")
+    click.echo(f"场外估算盈亏: {otc_gain:+,.2f}")
+
+    if snapshots:
+        click.echo("")
+        click.echo("最近每日快照:")
+        for snapshot in snapshots:
+            click.echo(f"{snapshot['timestamp'][:10]}  {snapshot['total_amount']:,.2f}")
+
+    click.echo("")
+    click.echo("关键口径:")
+    click.echo("- 场外 = 支付宝。")
+    click.echo("- 晚上支付宝实际收益比盘中估算更准。")
+    click.echo("- etf curve 只看每日最后一条 snapshot，不看盘中。")
+    click.echo("- 新窗口先跑 etf brief、etf pnl、etf curve 恢复状态。")
+
+    click.echo("")
+    click.echo("新窗口接续提示:")
+    click.echo("请读取 ~/.etf/context.md，然后运行 etf brief、etf pnl、etf curve，继续帮我整理 ETF/支付宝投资账本。")
+
+
+@cli.command()
+@click.option("--last", "last_n", default=30, help="Number of recent days to show")
 @click.option("--bar", "bar_chart", is_flag=True, help="Show bar/area chart instead of line chart")
 def curve(last_n: int, bar_chart: bool):
     """Draw terminal portfolio equity curve from saved snapshots."""
     if not SNAPSHOTS_FILE.exists():
         click.echo("No snapshots yet. Use 'etf snapshot' first.")
         return
-    lines = SNAPSHOTS_FILE.read_text().strip().splitlines()
-    snapshots = [json.loads(line) for line in lines if line.strip()]
+    snapshots = _load_snapshots()
     if not snapshots:
         click.echo("No snapshots found.")
         return
-    snapshots = snapshots[-last_n:]
+    snapshots = _last_snapshot_per_day(snapshots)[-last_n:]
     values = [s["total_amount"] for s in snapshots]
-    chart_width = min(len(values), 60)
-    chart_height = 10
-    chart = _render_bar_chart(values, width=chart_width, height=chart_height) if bar_chart else _render_line_chart(values, height=chart_height)
-
-    min_v = min(values)
-    max_v = max(values)
     start = snapshots[0]
     end = snapshots[-1]
     total_return = (end["total_amount"] - start["total_amount"]) / start["total_amount"] * 100
 
-    # Draw chart with y-axis labels
-    click.echo(f"\n资产曲线  最近 {len(snapshots)} 条\n")
-    for i, row in enumerate(chart):
-        y_val = max_v - (max_v - min_v) * i / (chart_height - 1)
-        label = f"{y_val:>10,.0f}"
-        click.echo(f"{label} ┤ {row}")
+    # Build x labels: short dates
+    x_labels = [s["timestamp"][5:10] for s in snapshots]
+    x_vals = builtins.list(range(len(values)))
 
-    click.echo(f"{'':>10} ┼{'─' * chart_width}")
+    # Determine line color based on total return
+    line_color = "green" if total_return >= 0 else "red"
 
-    # Draw x-axis labels
-    dates = [s["timestamp"][:10] for s in snapshots]
-    first_date = dates[0] if dates else ""
-    last_date = dates[-1] if dates else ""
-    click.echo(f"{'':>10}   {first_date}{' ' * max(chart_width - 20, 1)}{last_date}")
+    plt.clear_figure()
+    plt.title("资产曲线")
+    plt.xlabel("日期")
+    plt.ylabel("总资产")
+    plt.plot(x_vals, values, color=line_color)
+    if bar_chart:
+        plt.bar(x_vals, values, color=line_color)
+    # Show date labels on x axis: first, middle, last
+    n = len(x_labels)
+    if n <= 10:
+        plt.xticks(x_vals, x_labels)
+    else:
+        step = max(n // 5, 1)
+        tick_positions = builtins.list(range(0, n, step))
+        if n - 1 not in tick_positions:
+            tick_positions.append(n - 1)
+        tick_labels = [x_labels[i] for i in tick_positions]
+        plt.xticks(tick_positions, tick_labels)
+    plt.yticks([min(values), (min(values) + max(values)) / 2, max(values)])
+    plt.show()
 
     click.echo(f"\n起始: {start['total_amount']:,.0f} ({start['timestamp'][:10]})")
     click.echo(f"当前: {end['total_amount']:,.0f} ({end['timestamp'][:10]})")
