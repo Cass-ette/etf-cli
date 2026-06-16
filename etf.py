@@ -755,6 +755,82 @@ def get(symbol: str, output_json: bool, output_ai: bool, source: Optional[str]):
 
 
 @cli.command()
+@click.argument("symbols", nargs=-1, required=True)
+@click.option("--days", "days", default=5, help="Number of trading days to show (default 5)")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
+def hist(symbols, days: int, output_json: bool):
+    """Fetch historical daily data for one or more ETF codes.
+
+    Example:
+      etf hist 159887 159842 159928
+      etf hist 159887 --days 10
+    """
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    results = {}
+    # ETF 在深交所，secid 前缀 0；港股前缀 116；美股前缀 105
+    for symbol in symbols:
+        secid = f"0.{symbol}"
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            "klt": "101",  # daily
+            "fqt": "1",
+            "beg": "19900101",
+            "end": "20991231",
+        }
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            }
+            data = None
+            for attempt in range(3):
+                try:
+                    r = requests.get(url, params=params, timeout=10, headers=headers)
+                    data = r.json()
+                    break
+                except Exception:
+                    time.sleep(0.5 * (attempt + 1))
+            if data is None:
+                results[symbol] = {"error": "request failed after retries"}
+                continue
+            klines = (data.get("data") or {}).get("klines", [])
+            rows = []
+            for k in klines:
+                parts = k.split(",")
+                # date, open, close, high, low, volume, amount, amplitude, pct, change, turnover
+                rows.append({
+                    "date": parts[0],
+                    "open": float(parts[1]),
+                    "close": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                    "pct": float(parts[8]) if len(parts) > 8 and parts[8] else None,
+                })
+            results[symbol] = rows[-days:] if days > 0 else rows
+        except Exception as e:
+            results[symbol] = {"error": str(e)}
+
+    if output_json:
+        click.echo(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+
+    # Markdown 表格输出
+    click.echo(f"\n最近 {days} 个交易日历史数据\n")
+    for symbol, rows in results.items():
+        if isinstance(rows, dict) and "error" in rows:
+            click.echo(f"❌ {symbol}: {rows['error']}")
+            continue
+        click.echo(f"### {symbol}")
+        click.echo("日期         收盘价     涨跌幅")
+        for r in rows:
+            pct_str = f"{r['pct']:+.2f}%" if r['pct'] is not None else "N/A"
+            click.echo(f"{r['date']}   {r['close']:<10.4f} {pct_str}")
+        click.echo("")
+
+
+@cli.command()
 @click.argument("symbol")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON for AI processing")
 @click.option("--ai", "output_ai", is_flag=True, help="Output AI-friendly markdown context")
